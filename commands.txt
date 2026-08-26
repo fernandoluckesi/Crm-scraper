@@ -1,0 +1,4 @@
+cd web-scraper
+npm install
+npx playwright install chromium
+npm run scrape:bot
