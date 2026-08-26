@@ -135,50 +135,93 @@ async function run() {
   }
 
   // Páginas seguintes
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 5;
+
   for (let pg = 2; pg <= totalPages; pg++) {
     await sleep(DELAY_BETWEEN_PAGES_MS);
 
-    // Clicar na próxima página usando o seletor de paginação
-    const pageButton = page.locator(
-      `#paginacao .paginationjs-page[data-num="${pg}"] a`
-    );
-
-    if ((await pageButton.count()) > 0) {
-      await pageButton.click();
-    } else {
-      // Se não encontrou o número direto, pode ter "..." — clicar no último visível
-      // ou no botão de "próximo" se existir
-      console.log(`  ⚠️  Botão da página ${pg} não encontrado — parando.`);
-      break;
-    }
-
-    // Esperar os novos resultados carregarem
     try {
-      await page.waitForSelector(".loading[style*='none']", { timeout: 10000 }).catch(() => {});
-      await page.waitForSelector(".busca-resultado .card-body", { timeout: 15000 });
-      await sleep(1500);
-    } catch {
-      console.log(`  ⚠️  Timeout na página ${pg} — parando.`);
-      break;
-    }
+      // Tentar clicar na página via seletor direto
+      const pageButton = page.locator(
+        `#paginacao .paginationjs-page[data-num="${pg}"] a`
+      );
 
-    const pageData = await extractMedicos(page);
+      if ((await pageButton.count()) > 0) {
+        await pageButton.click({ force: true, timeout: 10000 });
+      } else {
+        // Botão não visível no DOM — usar JS para disparar a paginação
+        const clicked = await page.evaluate((pageNum) => {
+          // O plugin paginationjs usa callback — simular clique via jQuery
+          if (window.jQuery && window.jQuery('#paginacao').data('pagination')) {
+            window.jQuery('#paginacao').pagination('go', pageNum);
+            return true;
+          }
+          // Fallback: procurar e clicar qualquer elemento com data-num
+          const el = document.querySelector(`[data-num="${pageNum}"] a`);
+          if (el) { el.click(); return true; }
+          return false;
+        }, pg);
 
-    if (pageData.length === 0) {
-      console.log(`  ⚠️  Página ${pg} sem dados — parando.`);
-      break;
-    }
+        if (!clicked) {
+          console.log(`  ⚠️  Página ${pg} não acessível — tentando próxima...`);
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            console.log(`  ❌ ${MAX_CONSECUTIVE_ERRORS} erros seguidos — parando.`);
+            break;
+          }
+          continue;
+        }
+      }
 
-    allMedicos.push(...pageData);
+      // Esperar carregamento
+      try {
+        await sleep(2000);
+        await page.waitForSelector(".busca-resultado .card-body", { timeout: 15000 });
+        await sleep(1000);
+      } catch {
+        console.log(`  ⚠️  Timeout carregando página ${pg} — pulando...`);
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          console.log(`  ❌ ${MAX_CONSECUTIVE_ERRORS} erros seguidos — parando.`);
+          break;
+        }
+        continue;
+      }
 
-    if (pg % 10 === 0 || pg <= 3) {
-      console.log(`  ✓ Página ${pg}/${totalPages} — ${allMedicos.length} total`);
-    }
+      const pageData = await extractMedicos(page);
 
-    // Salvar progresso a cada 10 páginas
-    if (pg % 10 === 0) {
-      const partial = path.join(OUTPUT_DIR, `medicos_${UF}_partial.json`);
-      fs.writeFileSync(partial, JSON.stringify(allMedicos, null, 2), "utf-8");
+      if (pageData.length === 0) {
+        console.log(`  ⚠️  Página ${pg} sem dados — pulando...`);
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          console.log(`  ❌ ${MAX_CONSECUTIVE_ERRORS} erros seguidos — parando.`);
+          break;
+        }
+        continue;
+      }
+
+      // Sucesso — resetar contador de erros
+      consecutiveErrors = 0;
+      allMedicos.push(...pageData);
+
+      if (pg % 10 === 0 || pg <= 3) {
+        console.log(`  ✓ Página ${pg}/${totalPages} — ${allMedicos.length} total`);
+      }
+
+      // Salvar progresso a cada 10 páginas
+      if (pg % 10 === 0) {
+        const partial = path.join(OUTPUT_DIR, `medicos_${UF}_partial.json`);
+        fs.writeFileSync(partial, JSON.stringify(allMedicos, null, 2), "utf-8");
+      }
+    } catch (err) {
+      console.log(`  ⚠️  Erro na página ${pg}: ${err.message.substring(0, 60)} — continuando...`);
+      consecutiveErrors++;
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        console.log(`  ❌ ${MAX_CONSECUTIVE_ERRORS} erros seguidos — parando.`);
+        break;
+      }
+      continue;
     }
   }
 
